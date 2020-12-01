@@ -60,6 +60,15 @@ using avro::compileJsonSchema;
 #define ANY_NS  "boost"
 #endif
 
+#if __cplusplus >= 201402L
+// use std::quoted if c++14 or newer.
+#include <iomanip>
+using std::quoted;
+#else
+#include <boost/io/quoted.hpp>
+using boost::io::quoted;
+#endif
+
 struct PendingSetterGetter {
     string structName;
     string type;
@@ -107,6 +116,9 @@ class CodeGen {
     std::string generateType(const NodePtr& n);
     std::string generateDeclaration(const NodePtr& n);
     std::string doGenerateType(const NodePtr& n);
+
+    bool writeJsonSchema_;
+
     void generateEnumTraits(const NodePtr& n);
     void generateTraits(const NodePtr& n);
     void generateRecordTraits(const NodePtr& n);
@@ -116,12 +128,13 @@ public:
     CodeGen(std::ostream& os, const std::string& ns,
         const std::string& schemaFile, const std::string& headerFile,
         const std::string& guardString,
-        const std::string& includePrefix, bool noUnion) :
+        const std::string& includePrefix, bool noUnion, bool writeJsonSchema) :
         unionNumber_(0), os_(os), inNamespace_(false), ns_(ns),
         schemaFile_(schemaFile), headerFile_(headerFile),
         includePrefix_(includePrefix), noUnion_(noUnion),
         guardString_(guardString),
-        random_(static_cast<uint32_t>(::time(0))) { }
+        random_(static_cast<uint32_t>(::time(0))),
+        writeJsonSchema_(writeJsonSchema){ }
     void generate(const ValidSchema& schema);
 };
 
@@ -735,6 +748,10 @@ void CodeGen::generate(const ValidSchema& schema)
         << "#include \"" << includePrefix_ << "Encoder.hh\"\n"
         << "#include \"" << includePrefix_ << "Decoder.hh\"\n"
         << "\n";
+    if (writeJsonSchema_) {
+        // if we're writing the json schema, we need Compiler.hh to have access to compileJsonSchema
+        os_ << "#include \"" << includePrefix_ << "Compiler.hh\"\n";
+    }
 
     vector<string> nsVector;
     if (! ns_.empty()) {
@@ -745,6 +762,22 @@ void CodeGen::generate(const ValidSchema& schema)
             os_ << "namespace " << *it << " {\n";
         }
         inNamespace_ = true;
+    }
+
+    // if writeJsonSchema_ is true, we want to write a jsonSchema string
+    // and a helper function to create a ValidSchema from it.
+    if (writeJsonSchema_) {
+        os_ << "const std::string jsonSchemaString = "
+        << quoted(schema.toJson(false)) << ";" << std::endl
+        << std::endl
+        << "std::shared_ptr<avro::ValidSchema> loadSchemaFromString() {" << std::endl
+        << "    std::stringstream ss(jsonSchemaString);" << std::endl
+        << std::endl
+        << "    auto schema = std::make_shared<avro::ValidSchema>(avro::ValidSchema());" << std::endl
+        << "    avro::compileJsonSchema(ss, *schema);" << std::endl
+        << std::endl
+        << "    return schema;" << std::endl
+        << "}" << std::endl;
     }
 
     const NodePtr& root = schema.root();
@@ -793,6 +826,7 @@ static const string OUT("output");
 static const string IN("input");
 static const string INCLUDE_PREFIX("include-prefix");
 static const string NO_UNION_TYPEDEF("no-union-typedef");
+static const string JSON_SCHEMA("json-schema");
 
 static string readGuard(const string& filename)
 {
@@ -826,7 +860,9 @@ int main(int argc, char** argv)
         ("no-union-typedef,U", "do not generate typedefs for unions in records")
         ("namespace,n", po::value<string>(), "set namespace for generated code")
         ("input,i", po::value<string>(), "input file")
-        ("output,o", po::value<string>(), "output file to generate");
+        ("output,o", po::value<string>(), "output file to generate")
+        ("json-schema,j", po::bool_switch(), "add json schema to the generated code")
+        ;
 
     po::variables_map vm;
     po::store(po::parse_command_line(argc, argv, desc), vm);
@@ -842,6 +878,8 @@ int main(int argc, char** argv)
     string outf = vm.count(OUT) > 0 ? vm[OUT].as<string>() : string();
     string inf = vm.count(IN) > 0 ? vm[IN].as<string>() : string();
     string incPrefix = vm[INCLUDE_PREFIX].as<string>();
+
+    bool writeJsonSchema = vm[JSON_SCHEMA].as<bool>();
     bool noUnion = vm.count(NO_UNION_TYPEDEF) != 0;
     if (incPrefix == "-") {
         incPrefix.clear();
@@ -862,9 +900,9 @@ int main(int argc, char** argv)
         if (! outf.empty()) {
             string g = readGuard(outf);
             ofstream out(outf.c_str());
-            CodeGen(out, ns, inf, outf, g, incPrefix, noUnion).generate(schema);
+            CodeGen(out, ns, inf, outf, g, incPrefix, noUnion, writeJsonSchema).generate(schema);
         } else {
-            CodeGen(std::cout, ns, inf, outf, "", incPrefix, noUnion).
+            CodeGen(std::cout, ns, inf, outf, "", incPrefix, noUnion, writeJsonSchema).
                 generate(schema);
         }
         return 0;
